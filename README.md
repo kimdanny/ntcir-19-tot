@@ -1,177 +1,227 @@
-# Dataset of LLM-Elicited TOT Queries
-The final dataset of LLM-elicited TOT queries described in our paper is available at [Dataset](data/synthetic_queries_movie_landmark_person.jsonl). It contains 450 synthetically generated queries based on entities sampled from Wikipedia, with an equal distribution across three domains: Movie, Landmark, and Person (150 queries per domain).
+# NTCIR ToT (Multilingual Retrieval)
 
-## Dataset Structure
+This repository contains scripts for:
 
-Each entry in the dataset includes the following fields:
+- Building CJK Wikipedia-aligned corpora (English/Chinese/Japanese/Korean).
+- Generating LLM-based Tip-of-the-Tongue (ToT) queries.
+- Running lexicon and dense retrieval baselines for multilingual ToT evaluation.
 
-- `query`: The generated TOT query  
-- `entityName`: The Wikipedia title of the target entity  
-- `wikidataID`: The corresponding Wikidata identifier  
-- `domain`: The domain category (Movie, Landmark, or Person)  
+The codebase is script-driven (no single orchestrator). Most extraction scripts require editing constants in-file (`YOUR_*` placeholders).
 
-## License
+## Repository Layout
 
-The dataset is freely available for research purposes under an open-access license. Please cite our paper if you use this dataset in your work.
+- `CJK_data_extraction/`: dataset creation/enrichment scripts (Wikipedia alignment, domain labels, popularity/doc length, CJK mapping, translations).
+- `llm_queries/`: LLM query generation and GPT ranking helper scripts.
+- `model_inference/`: retrieval/evaluation pipelines (`run_lexicon_*`, `run_dense_*`, `gpt_post_*`, `tot_*` dataset registration).
+- `CJK_data_stats/`: distribution/correlation analysis scripts.
+- `analysis/`: notebook for system-rank correlation (`tau_correlation.ipynb`).
+- `output/`: local logs/debug outputs.
 
+## Environment Setup
 
+This repo targets Python 3.9.
 
-# Generating LLM-Elicited TOT Queries
-This repository contains scripts to generate LLM-Elicited TOT Queries. 
-Synthetic TOT queries generated from this repository were used as test queries for the TREC 2024 Tip of the Tongue (TOT) track and will be used for subsequent tracks.
-
-## 1. Python Environment
-This codebase is implemented in Python 3.9.19. 
-The necessary libraries can be found in `requirements.txt`. 
-
-### 1.1 API Key Setup
-Create a local environment file from the template and set your OpenAI key:
-
-```
-cp .env.example .env
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Set `OPENAI_API_KEY` in `.env` with your own key value.
-Keep `.env` local only (do not commit it).
+For OpenAI-backed scripts, create a local `.env` file in the repo root and set:
 
-Generated logs and JSON outputs under `output/logs/` and `output/json_output/` are also intended to stay local.
-
-## 2. Data Preparation
-1. The raw MS-ToT data is located at `data/ToT.txt`, which is sourced from [Tip of the Tongue Known Item Retrieval Dataset for Movie Identification](https://github.com/microsoft/Tip-of-the-Tongue-Known-Item-Retrieval-Dataset-for-Movie-Identification).
-2. We utilized the `wikipediaURL` column to obtain movie names and saved the `ID`, `QuestionBody`, `wikipediaURL`, and `movieName` in the TSV file `data/ToT_processed.tsv`.
-3. We found that 801 out of the 1000 movies provide a `wikipediaURL`. We removed the 199 rows with empty `movieName` and saved a new TSV file, `data/ToT_processed_filtered.tsv`.
-
-Note: One can automatically retrieve the remaining movie names using the `imdbURL` column. Further processing is needed to match the movie names with Wikipedia page titles. In this project, we did this manually.
-
-## 3. Eliciting TOT Queries from LLMs
-Run `llm_queries/generate_gpt_queries.py` to generate LLM queries. 
-The following are the core components of the script.
-
-### 3.1 Prompt Template
-We experimented with six different templates. 
-The prompt templates can be found in `llm_queries/generate_gpt_queries.py`.
-
-#### 3.1.1 Wikipedia Page Summarization
-Most of the prompt templates allow for the addition of reference information about the entity. In our implementation, we append paragraphs from the Wikipedia page of the entity. Specifically for the movie domain, we use the introduction section and the Plot section if it exists. We found that most of the selected Wikipedia paragraphs can fit into the prompt without exceeding the 4096 input token limit of the GPT-4o model we used. 
-You can adjust `max_paragraphs` in the `split_document` function if the context needs to be shortened.
-
-### 3.2 Model Configuration
-We use the GPT-4o model. 
-`max_tokens` is set to 1024 for all experiments.
-
-### 3.3 Query Generation
-1. First, use the `generate_multiple` function to automatically generate ToT queries. A few paths in the function:
-    - `input_file_path`: input the raw TSV file generated from MSToT with movie names; we use `data/ToT_processed_filtered.tsv`.
-    - `output_file_path`: the output file path to save the generated queries in TSV format.
-    - `json_folder`: the output folder path to save the full prompt and response for each target object to JSON files in the following format:
-        ```
-        result = {
-            "topic": topic,
-            "ToTObject": tgt_object,
-            "paragraphs": paragraphs,
-            "prompt": TEMPLATE_6,
-            "response": response,
-        }
-        ```
-    - `log_folder_path`: the output file path to save the log files. `process_log.txt` contains the API communication information, while `failed_objects_log.txt` contains the information about failed objects that need to be re-run in a later step.
-    - `queries_file_path`: input the `queries.jsonl` based on the dataset split for which you want to generate queries. Choose from `[train, dev, test]`.
-
-2. During generation, several checks are performed:
-    - Empty paragraphs: if the paragraphs are empty, we skip the object. This occurs when no information is returned from the Wikipedia API, typically when the movie name does not match the movie name in the URL. This mainly happens with movies that share the same name but were released in different years. For example, in the MS-ToT dataset, the URL for the movie "Nowhere" is "https://en.wikipedia.org/wiki/Nowhere", but it has now become "https://en.wikipedia.org/wiki/Nowhere_(1997_film)" due to a new movie with the same name at "https://en.wikipedia.org/wiki/Nowhere_(2023_film)".
-    - Max retries reached: We check if the LLM response contains the movie name. If it does, we re-run the object. We set the maximum retries to 3, and if the API call fails three times, we skip the object.
-    - Other Errors: Record other errors from the API call and the processing loop.
-
-3. After the `generate_multiple` function is finished, run the `generate_single` function to re-run the failed objects according to `failed_objects_log.txt`. You need to set the values for `topic`, `mstot_id`, `tgt_object`, and `wikipediaURL` for each re-run.
-
-4. Finally, use `check_missing_ids` and `check_duplicate_ids_in_tsv` to ensure all objects are generated and that there are no duplicate IDs in the output TSV file.
-
-Note: In the test split, there are two movies without a `wikipediaURL`: Fall Out (ID: 667) and Phantom Town (IDs: 884 and 931). We find movie names by IMDB ID. Note that Phantom Town exists in the dataset twice with different IDs.
-
-## 4. Convert to TREC Style
-Run `llm_queries/format_queries_in_TREC_style.py` to generate the ToT queries in TREC style. Set the paths according to the comments in the script. The output file can now be used for model training and inference, which will be utilized in the following validation step.
-
-## 5. Validation of Generated Synthetic Queries through System Ranking Correlation
-
-To check the validity of the generated queries, we assess the correlation between two system rankings: one generated by CQA-based queries (e.g., MS-TOT) and the other by synthetic queries.
-
-We employ 1) lexicon-based open-source retrieval models, 2) dense open-source retrieval models, and 3) closed-source API-based models as retrieval models.
-
-In total, we run 40 different retrieval models and rank the systems based on retrieval performance (NDCG and MRR), followed by calculating Kendall's Tau correlation between the two system rankings.
-
-Below are the guidelines for running the retrieval models.
-
-### 5.1 Lexicon-based Retrieval Models
-
-Run `model_inference/run_lexicon.py` for lexicon methods. Consider the following example command for BM25:
-
-```
-python run_lexicon.py --run_id bm25_0.8_1.0_test_llm-w-para \
-        --index_name bm25_0.8_1.0_test_llm_w_para \
-        --index_path ./anserini_indicies \
-        --docs_path ./anserini_docs \
-        --data_path ./datasets-llm-w-para \
-        --param_k1 0.8 --param_b 1.0 \
-        --field text --query text --split test \
-        --run ./results/BM25-0.8-1.0-trec-baseline/llm-w-para/test.run \
-        --run_format trec_eval \
+```bash
+OPENAI_API_KEY=your_api_key_here
 ```
 
-To use the LMDirichlet Similarity model, add `--param_mu <mu_value>` as a parameter, e.g., `--param_mu 1000`.
+## Expected Dataset Format for Inference
 
-You can also use TF-IDF, IB Similarity, DFR Similarity, and more by changing the methods in the script.
+`model_inference/tot_en.py`, `model_inference/tot_zh.py`, `model_inference/tot_ja.py`, `model_inference/tot_ko.py` register local datasets via `ir_datasets`.
 
-### 5.2 Dense Models
+Expected layout:
 
-Run `model_inference/run_dense.py` for dense models. Consider the following example command for DistilBERT from the TREC baseline:
-
-```
-python run_dense.py --freeze_base_model \
-        --run_id baseline_distilbert_test_llm-w-para \
-        --data_path ./datasets-llm-w-para \
-        --model_or_checkpoint path/to/the/checkpoint \
-        --model_dir ./results/distilbert-trec-baseline/llm-w-para \
-        --embed_size 768 --encode_batch_size 256 \
-        --query text --device cuda
-```
-
-You can change the model to any dense model supported in SentenceTransformers. You can also use DPR models. Remember to change `embed_size` based on the model architecture.
-
-### 5.3 Closed-source Models
-Run `llm_queries/rank_with_gpt.py` to generate rankings using GPT models. Input the TREC style queries file and the output file path to save the ranking results. The script will generate ranking results for each query. 
-For all our experiments, we consistently set `temperature` to 0.5 and `max_tokens` to 1024. We follow the same prompt used in [TREC-ToT baseline](https://github.com/TREC-ToT/bench/blob/main/GPT4.md). Note that the generated ranking results come with order numbers when using the GPT-3.5 Turbo Instruct model. Apply `llm_queries/clean_gpt_ranking.py` to remove the order numbers and save the cleaned ranking results.
-
-After generating the ranking results, you can use `model_inference/gpt_post.py` to process the ranking results and generate run files in TREC format. Consider the following example commands:
-
-Matching the names without aliases:
-```
-python gpt_post.py \
-    --run_id gpt_4o_llm_w_paragraph_temp-0.7-no-alias \
-    --input cleaned_gpt_test_queries_llm_w_paragraph.jsonl \
-    --split test \
-    --data_path ./datasets-llm-w-para \
-    --index_name gpt_4o_turbo_llm_w_paragraph-no-alias \
-    --index_path ./anserini_indicies \
-    --docs_path ./anserini_docs \
-    --run gpt_4o_temp-0.7-no-alias.run \
-    --run_format trec_eval \
-    --run_id gpt_4o_temp-0.7-no-alias
+```text
+<DATA_PATH>/
+  corpus.jsonl
+  train/
+    queries.jsonl
+    qrel.txt
+  dev/
+    queries.jsonl
+    qrel.txt
+  test/
+    queries.jsonl
+    qrel.txt   # optional
 ```
 
-Matching the names with aliases, which is expected to perform better than the above:
-```
-python gpt_post.py \
-    --run_id gpt_4o_llm_w_paragraph_temp-0.7-with-alias \
-    --input llm-w-para-temp-0.7/cleaned_gpt_test_queries_llm_w_paragraph.jsonl \
-    --split test \
-    --data_path ./datasets-llm-w-para \
-    --index_name gpt_4o_turbo_llm_w_paragraph-with-alias \
-    --index_path ./anserini_indicies \
-    --docs_path ./anserini_docs \
-    --run gpt_4o_temp-0.7-with-alias.run \
-    --run_format trec_eval \
-    --gather_wikidata_aliases \
-    --wikidata_cache ./wikidata_cache/
+Expected key fields:
+
+- `corpus.jsonl` records: `id`, `url`, `title`, `text`, `domains`, `id_en`, `popularity`, `doc_length`
+- `queries.jsonl` records: `query_id`, `source`, `llm`, `domain`, `rel_doc_id`, `rel_doc_title`, `query`
+
+## Workflow 1: Build/Enrich CJK Corpora
+
+Most scripts below use in-file constants such as `YOUR_OUTPUT_DIRECTORY_PATH`, `YOUR_DATASET_PATH_HERE`, `/dataset/`, or `/artifacts/`.
+Update those values before running.
+
+1. Export English corpus:
+
+```bash
+python CJK_data_extraction/wikidata_en.py
 ```
 
-### 5.4 Calculating System Rank Correlations
-Run `analysis/KT_excel.ipynb` to perform Kendall's tau analysis by reading the CSV results.
+2. Create language corpora and EN-linked bilingual files:
+
+```bash
+python CJK_data_extraction/wikidata_zh.py
+python CJK_data_extraction/wikidata_ja.py
+python CJK_data_extraction/wikidata_ko.py
+```
+
+3. Optional cleanup/lookup utilities:
+
+```bash
+python CJK_data_extraction/wikidata_cleaning.py
+python CJK_data_extraction/build_english_look_up.py
+python CJK_data_extraction/en_wiki_load.py
+```
+
+4. Add metadata:
+
+```bash
+python CJK_data_extraction/attach_domains.py
+python CJK_data_extraction/attach_popularity_doclen.py
+```
+
+## Workflow 2: Generate LLM ToT Queries
+
+Main script:
+
+```bash
+python llm_queries/generate_gpt_queries.py
+```
+
+Before running, edit configuration constants in `main_processing()`:
+
+- `input_dir`
+- `output_dir`
+- `json_folder`
+- `log_folder_path`
+- `files_to_process`
+
+The input JSONL rows are expected to include fields like `id`, `id_en`, `title`, `text`, and `domains`.
+
+Output includes:
+
+- query JSONL files with fields such as `query_id`, `domain`, `rel_doc_id`, `rel_doc_title`, `query`
+- per-entity debug JSON files
+- logs in `process_log.txt` / `failed_objects_log.txt`
+
+## Workflow 3: Retrieval & Evaluation
+
+### Lexicon Retrieval
+
+Use language-specific scripts:
+
+- `model_inference/run_lexicon_en.py`
+- `model_inference/run_lexicon_zh.py`
+- `model_inference/run_lexicon_ja.py`
+- `model_inference/run_lexicon_ko.py`
+
+Example:
+
+```bash
+python model_inference/run_lexicon_en.py \
+  --data_path /path/to/dataset \
+  --split test \
+  --field text \
+  --query text \
+  --index_name en_qld_test \
+  --param_mu 1000 \
+  --run runs/en_qld_test.run \
+  --run_format trec_eval \
+  --run_id en_qld_test
+```
+
+Note: current `run_lexicon_*` code uses `searcher.set_qld(...)` by default (LMDirichlet). BM25 lines are present but commented.
+
+### Dense Retrieval
+
+Use:
+
+- `model_inference/run_dense_en.py`
+- `model_inference/run_dense_zh.py`
+- `model_inference/run_dense_ja.py`
+- `model_inference/run_dense_ko.py`
+
+Example:
+
+```bash
+python model_inference/run_dense_en.py \
+  --data_path /path/to/dataset \
+  --model_or_checkpoint sentence-transformers/all-mpnet-base-v2 \
+  --embed_size 768 \
+  --encode_batch_size 128 \
+  --query text \
+  --model_dir results/dense_en \
+  --run_id dense_en_test \
+  --device cuda
+```
+
+This pipeline currently performs encoding/retrieval/evaluation with pretrained checkpoints; training blocks are mostly disabled in code.
+
+### GPT Ranking Post-processing to Run Files
+
+1. Generate ranked guesses from GPT:
+
+Before running, edit these placeholders in `llm_queries/rank_by_gpt.py`:
+
+- `input_source_file`
+- `output_ranking`
+
+```bash
+python llm_queries/rank_by_gpt.py
+```
+
+2. Clean ranking text:
+
+Before running, set placeholder paths in one of the following scripts:
+
+- `llm_queries/clean_gpt_ranking.py`: `input_raw_ranking_file`, `output_cleaned_ranking_file`
+- `llm_queries/clean_gpt_ranking_dir.py`: `input_directory`, `output_directory`
+
+```bash
+python llm_queries/clean_gpt_ranking.py
+# or
+python llm_queries/clean_gpt_ranking_dir.py
+```
+
+3. Convert cleaned rankings to TREC run files:
+
+```bash
+python model_inference/gpt_post_en.py \
+  --input /path/to/cleaned.jsonl \
+  --split test \
+  --data_path /path/to/dataset \
+  --index_name gpt_title_index_en \
+  --run runs/gpt_en.run \
+  --run_format trec_eval \
+  --run_id gpt_en
+```
+
+Equivalent scripts exist for `zh`, `ja`, and `ko`.
+
+## Analysis Utilities
+
+- `CJK_data_stats/CJK_data_visual.py`
+- `CJK_data_stats/CJK_pop_doclen_correlation.py`
+- `CJK_data_stats/CJK_pop_doclen_stratified.py`
+- `analysis/tau_correlation.ipynb`
+
+These scripts also use in-file path constants and should be edited before execution.
+
+## Practical Notes
+
+- Many scripts have `YOUR_*` placeholders and are not turnkey until configured.
+- Chinese pipelines use OpenCC normalization in several inference scripts.
+- `pyserini`-based scripts require Java and Lucene-compatible setup.
+- Keep `.env`, `output/logs/`, and `output/json_output/` local.
